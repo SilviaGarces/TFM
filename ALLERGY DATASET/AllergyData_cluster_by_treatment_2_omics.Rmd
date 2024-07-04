@@ -1,0 +1,708 @@
+---
+title: "Allergy Dataset"
+author: "Silvia Garces"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# ONLY METABOLOMICS + PROTEOMICS 46T
+Now we will try to see if there is any division in T0, that means, check if the methods can separate the phenotypes of the patients at baseline.
+This dataset has the samples in rows while variables are in columns
+
+###1. SNF
+Samples in rows and variables in columns
+```{r}
+library(SNFtool)
+Sys.time()
+#Calculate distances within the datasets
+dist_metabo_T0 = (dist2(as.matrix(omics_T0$Metabo_T0), as.matrix(omics_T0$Metabo_T0)))^(1/2)
+dist_prot48_T0 = (dist2(as.matrix(omics_T0$Prot48T_T0), as.matrix(omics_T0$Prot48T_T0)))^(1/2)
+
+K=20
+sigma=0.5
+
+W1 = affinityMatrix(dist_metabo_T0, K, sigma)
+W2 = affinityMatrix(dist_prot48_T0, K, sigma)
+
+W_joined <- SNF(list(W1,W2), K, 20)
+
+estimateNumberOfClustersGivenGraph(W_joined, 2:5)
+Sys.time()
+```
+Select optimal number of clusters
+```{r}
+C=2 #number of clusters
+group=spectralClustering(W_joined,C)
+
+displayClusters(W_joined,group)
+
+#Check with true labels:
+M_label=cbind(group, as.numeric(as.factor(samples_df_T0$treatment)))
+colnames(M_label)=c("spectralClustering","TrueLabel")
+rownames(M_label)=samples_df_T0$sample
+M_label_colors=cbind("spectralClustering"=getColorsForGroups(M_label[,"spectralClustering"],
+colors=c("blue","red")),"TrueLabel"=getColorsForGroups(M_label[,"TrueLabel"], colors = c("green","violet")))
+
+#Plot heatmap
+layout(matrix(c(1,2), ncol=2, byrow=TRUE))
+par(mar=c(5, 4, 4, 2))
+# Plot the heatmap
+displayClustersWithHeatmap(W_joined, group, M_label_colors)
+
+par(mar=c(0,0,0,0))
+plot(1, type = "n", axes=F, xlab="", ylab="") # Create empty plot
+legend(x="top", legend=unique(group), fill=unique(M_label_colors[,"spectralClustering"]), title = "SNF clusters", bg="transparent", horiz=TRUE)
+legend(x="center", legend=unique(samples_df_T0$treatment), fill= c("green","violet"), title = "Treatment", bg="transparent", horiz=TRUE)
+```
+###2. NEMO:
+Data needs to be transposed as samples need to be in columns
+```{r}
+library(NEMO)
+Sys.time()
+#transpose matrices
+data_transposed_2_omics <- list(t(omics_T0$Metabo_T0),t(omics_T0$Prot48T_T0))
+
+affinity_graph_T0_2 <- nemo.affinity.graph(data_transposed_2_omics, k= 20)
+num_clusters_T0_2 <- nemo.num.clusters(affinity_graph_T0_2)
+clustering_nemo_T0_2 <- nemo.clustering(data_transposed_2_omics, num.clusters = num_clusters_T0_2, num.neighbors = 20)
+
+NEMO_label=cbind(clustering_nemo_T0_2, as.numeric(as.factor(samples_df_T0$treatment)))
+colnames(NEMO_label)=c("nemoClustering","TrueLabel")
+rownames(NEMO_label)=samples_df_T0$sample
+
+NEMO_label_colors=cbind("nemoClustering"=getColorsForGroups(NEMO_label[,"nemoClustering"],
+colors=c("blue","red")),"TrueLabel"=getColorsForGroups(NEMO_label[,"TrueLabel"], colors = c("green","violet")))
+
+displayClustersWithHeatmap(affinity_graph_T0_2, clustering_nemo_T0_2, NEMO_label_colors)
+
+plot.new()
+legend(x="top", legend=unique(clustering_nemo_T0_2), fill=unique(NEMO_label_colors[,"nemoClustering"]), title = "NEMO clusters", bg="transparent", horiz=TRUE, cex=0.8)
+legend(x="center", legend=unique(samples_df_T0$treatment), fill= c("green", "violet"), title = "Treatment", bg="transparent", horiz=TRUE, cex=0.8)
+Sys.time()
+```
+###3. MCIA:
+Use transposed data
+```{r}
+library(omicade4)
+Sys.time()
+mcoin_2 <- mcia(data_transposed_2_omics)
+plot.mcia(mcoin_2,axes = 1:2 , sample.lab = FALSE, df.color = 1:2)
+plotVar(mcoin_2, var=NA, bg.var.col=1:2, var.lab=TRUE)
+Sys.time()
+```
+
+Make plots using 2 latent variables
+```{r}
+color <- c("lightblue3","maroon")
+subset_mcia <- mcoin_2$mcoa$SynVar
+par(mar=c(5, 4, 4, 8), xpd=TRUE)
+plot(subset_mcia[, 1], subset_mcia[,2], xlab= "Variable 1", ylab= "Variable 2", col=color[as.numeric(as.factor(samples_df_T0$treatment))], pch=20, main = "Plot of samples in T0")
+legend("right", legend=unique(samples_df_T0$treatment), col=color,pch=20, title="Treatment", inset=c(-0.3, 0))
+```
+
+###4. moCluster
+Use transposed data
+```{r}
+library(mogsa)
+Sys.time()
+moa_2 <- mbpca(data_transposed_2_omics, ncomp=10, k="all", method = "globalScore", option = "lambda1",center=FALSE, scale= FALSE, moa= TRUE, svd.solver = "fast", maxiter = 1000)
+plot(moa, value="eig", type=2)
+#Check number of components/latent variables
+r <- bootMbpca(moa_2, mc.cores = 1, B=20, replace = FALSE, resample = "sample")
+
+```
+Keep appropriate number of components = 2
+```{r}
+moa_2var_2 <- mbpca(data_transposed_2_omics, ncomp=2, k=0.25, method = "globalScore", option = "lambda1",center=FALSE, scale= FALSE, moa= TRUE, svd.solver = "fast", maxiter = 1000)
+scr <- moaScore(moa_2)
+scrs <-moaScore(moa_2var_2)
+
+#do correlation
+diag(cor(scr[, 1:2], scrs))
+
+#Do hierarchical cluster and plot
+hcl <- hclust(dist(scrs))
+cls <- cutree(hcl, k=2) #Pre-select 2 clusters
+
+Sys.time()
+#Plot the results obtained with 2 components
+clsColor <- as.factor(cls)
+levels(clsColor) <- c("red","blue")
+clsColor<- as.character((clsColor))
+```
+Plot results:
+```{r}
+#Plot heatmap and add legend:
+heatmap(t(scrs[hcl$order, ]), ColSideColors = clsColor[hcl$order], Rowv = NA, Colv=NA)
+legend(x= "right", legend = c("Cluster 1","Cluster 2"), col = c("red","blue"), pch= 15)
+
+#Plot in component space
+symbols <- c(16, 3)
+par(mar=c(5, 4, 4, 8), xpd=TRUE)
+plot(scrs[, 1:2], col=clsColor, pch=symbols[as.numeric(as.factor(samples_df_T0$treatment))], main = "PC1 and PC2")
+legend("topright", legend=c("Cluster 1","Cluster 2"), col=unique(clsColor), pch=15, title="Clusters", inset=c(-0.25, 0))
+legend("bottomright", legend=unique(samples_df_T0$treatment), col=c("lightslategrey"), pch=symbols, title="Treatment", inset=c(-0.3, 0))
+```
+### 5.PINSPlus:
+Data can be used as original
+```{r}
+library(PINSPlus)
+Sys.time()
+omics_t0_2 <- list(omics_T0$Metabo_T0, omics_T0$Prot48T_T0)
+pins_cluster_t0_2 <- SubtypingOmicsData(dataList =omics_t0_2 , clusteringMethod = "kmeans", kMax=3)
+
+cluster1 <- pins_cluster_t0_2$cluster1
+cluster2 <- pins_cluster_t0_2$cluster2
+
+# Plot the clusters for Stage I using a scatter plot
+plot(cluster1, pch = 16, col = "blue", main = "Cluster Plot (Stage I)", xlab = "Sample", ylab = "Cluster")
+# Plot the clusters for Stage II using a scatter plot
+plot(cluster2, pch = 16, col = "red", main = "Cluster Plot (Stage II)", xlab = "Sample", ylab = "Cluster")
+Sys.time()
+
+```
+Plot PCA for first 2 components to check distribution of samples:
+```{r}
+# Subset the first two columns of the 'x' matrix (which are the PCA)
+subset_x <- pins_cluster_t0_2[["dataTypeResult"]][[1]][["pca"]][["x"]]
+cluster_colors <- c("coral", "cadetblue3")
+symbols <- c(16, 3)
+
+# Plot PC1 vs PC2
+par(mar=c(5, 4, 4, 8), xpd=TRUE)
+plot(subset_x[, 1], subset_x[, 2], 
+     xlab="PC1", ylab="PC2", 
+     main="Plot of PC1 vs PC2 in T0", 
+     col=cluster_colors[cluster1],
+     pch=symbols[as.numeric(as.factor(samples_df_T0$treatment))])
+legend("topright", legend=c("Cluster 1","Cluster 2"), col=cluster_colors, pch=15, title="Clusters", inset=c(-0.25, 0))
+legend("bottomright", legend=unique(samples_df_T0$treatment), col="lightslategrey", pch=symbols, title="Subtypes", inset=c(-0.3, 0))
+```
+###6.intNMF
+Make values positive if there is any negative value in the matrices
+```{r}
+library(IntNMF)
+Sys.time()
+if (!all(omics_T0$Metabo_T0>=0)){
+  data1_t0 <- pmax(omics_T0$Metabo_T0 + abs(min(omics_T0$Metabo_T0)), .Machine$double.eps)
+} else {
+  data1_t0 <- omics_T0$Metabo_T0
+}
+
+if (!all(omics_T0$Prot48T_T0>=0)){
+  data2_t0 <- pmax(omics_T0$Prot48T_T0 + abs(min(omics_T0$Prot48T_T0)), .Machine$double.eps)
+} else {
+  data2_t0 <- omics_T0$Prot48T_T0
+}
+
+dat_t0 <- list(as.matrix(data1_t0), as.matrix(data2_t0))
+
+#Get optimum number of clusters: nmf.opt.k
+opt_k<- nmf.opt.k(dat=dat_t0, n.runs = 5, n.fold = 5, k.range = 2:7, result = TRUE, 
+                  make.plot = TRUE, progress = TRUE)
+```
+Number of clusters: 2
+```{r}
+#We check and the optimal is 3
+fit <- nmf.mnnals(dat=dat_t0, k=2, maxiter = 200, st.count = 20, n.ini = 15, ini.nndsvd = TRUE, seed = TRUE)
+
+#Make silhouette scores
+SilhouettePlot(fit, cluster.col = NULL)
+ConsensusMatPlot(fit, colLab = TRUE, rowLab = TRUE)
+Sys.time()
+```
+Plot the clusters obtained in different factors:
+```{r}
+clusters_int <- fit$clusters
+subsets_df <- fit$W #get the basis matrix for the samples (nº of vectors = k)
+clus_colors <- c("darkorange1", "deepskyblue")
+symbols <- c(16, 3)
+
+par(mar=c(5, 4, 4, 8), xpd=TRUE)
+plot(subsets_df[, 1], subsets_df[, 2], 
+     xlab="Component 1", ylab="Component 2", 
+     main="Plot of Samples in space in T0", 
+     col=clus_colors[clusters_int],
+     pch= symbols[as.numeric(as.factor(samples_df_T0$treatment))])
+legend("topright", legend=c("Cluster 1","Cluster 2"), col=clus_colors, pch=15, title="Clusters", inset=c(-0.25, 0))
+legend("bottomright", legend=unique(samples_df_T0$treatment), col="lightslategrey", pch=symbols, title="Treatment", inset=c(-0.3, 0))
+```
+
+###7.MixOmics:
+```{r}
+library(mixOmics)
+Sys.time()
+names(omics_t0_2) <- c("metabo", "prot46") #list made in PINSplus method
+
+#sPLS basic model
+spls_2omics <- spls(X=omics_t0_2$metabo,Y=omics_t0_2$prot46, ncomp = 5, mode = 'regression')
+plotIndiv(spls_2omics, group = samples_df_T0$treatment, ind.names= FALSE, legend = TRUE, legend.title = "Treatments")
+```
+Tune the model:
+```{r}
+# repeated CV tuning of component count
+perf.spls.2omics <- perf(spls_2omics, validation = 'Mfold',
+                         folds = 10, nrepeat = 5) 
+
+plot(perf.spls.2omics, criterion = 'Q2.total')
+```
+Select number of variables:
+
+```{r}
+# set range of test values for number of variables to use from X dataframe
+list.keepX <- c(seq(10, 30, 5))
+# set range of test values for number of variables to use from Y dataframe
+list.keepY <- c(seq(10, 30, 5)) 
+
+#tunning parameters
+tune.spls.2omics <- tune.spls(X=omics_t0_2$metabo, Y=omics_t0_2$prot46, ncomp = 2,
+                              test.keepX = list.keepX,
+                              test.keepY = list.keepY,
+                              nrepeat = 1, folds = 10, # use 10 folds
+                              mode = 'regression', measure = 'cor') 
+plot(tune.spls.2omics)         # use the correlation measure for tuning
+```
+Get optimal:
+```{r}
+# extract optimal number of variables for X dataframe
+optimal.keepX <- tune.spls.2omics$choice.keepX 
+
+# extract optimal number of variables for Y datafram
+optimal.keepY <- tune.spls.2omics$choice.keepY
+
+optimal.ncomp <-  length(optimal.keepX)
+```
+
+Make final model:
+```{r}
+# use all tuned values from above
+final.spls.2omics <- spls(X=omics_t0_2$metabo, Y=omics_t0_2$prot46, ncomp = optimal.ncomp, 
+                    keepX = optimal.keepX,
+                    keepY = optimal.keepY,
+                    mode = "regression")
+Sys.time()
+```
+
+Make plots:
+```{r}
+##X-variate
+plotIndiv(final.spls.2omics, ind.names = FALSE, 
+         rep.space = "X-variate", # plot in X-variate subspace
+         group = samples_df_T0$treatment, # colour by time group
+         col.per.group = color.mixo(1:2), 
+         legend = TRUE, legend.title = 'Treatment')
+
+##Y-variate
+plotIndiv(final.spls.2omics, ind.names = FALSE,
+         rep.space = "Y-variate", # plot in Y-variate subspace
+         group = samples_df_T0$treatment, # colour by time group
+         col.per.group = color.mixo(1:2), 
+         legend = TRUE, legend.title = 'Treatment')
+
+##XY-variate
+plotIndiv(final.spls.2omics, ind.names = FALSE,
+         rep.space = "XY-variate", # plot in Y-variate subspace
+         group = samples_df_T0$treatment, # colour by time group
+         col.per.group = color.mixo(1:2), 
+         legend = TRUE, legend.title = 'Treatment')
+```
+Plot in 3D
+```{r}
+plotArrow(final.spls.2omics, ind.names = FALSE,
+          group = samples_df_T0$treatment, # colour by time group
+          col.per.group = color.mixo(1:2),
+          legend.title = 'Treatmentp')
+```
+####Try DIABLO:
+```{r}
+#Specify Y which are the treatments
+Sys.time()
+Y<- samples_df_T0$treatment
+
+#Do basic model
+result.diablo.t0_2 <- block.plsda(omics_t0_2, Y) # run the method
+plotIndiv(result.diablo.t0_2, legend = TRUE) # plot the samples
+plotVar(result.diablo.t0_2) # plot the variables
+```
+Make another model
+```{r}
+design = matrix(0.1, ncol = length(omics_t0_2), nrow = length(omics_t0_2), 
+                dimnames = list(names(omics_t0_2), names(omics_t0_2)))
+diag(design) = 0 # set diagonal to 0s
+
+# form basic DIABLO model
+basic.diablo.model = block.splsda(X = omics_t0_2, Y = Y, ncomp = 5, design = design) 
+
+# run component number tuning with repeated CV
+perf.diablo = perf(basic.diablo.model, validation = 'Mfold', 
+                   folds = 5, nrepeat = 10) 
+
+plot(perf.diablo) # plot output of tuning
+
+
+# set the optimal ncomp value
+ncomp = perf.diablo$choice.ncomp$WeightedVote["Overall.BER", "centroids.dist"] 
+
+# show the optimal choice for ncomp for each dist metric
+#perf.diablo$choice.ncomp$WeightedVote 
+
+# set grid of values for each component to test
+test.keepX = list (metabo = c(seq(10,25,5)), 
+                   prot48 = c(seq(10,25,5)))
+
+# run the feature selection tuning
+tune.omics_t0 = tune.block.splsda(X = omics_t0_2, Y = Y, ncomp = ncomp, 
+                              test.keepX = test.keepX, design = design,
+                              validation = 'Mfold', folds = 10, nrepeat = 1,
+                              dist = "centroids.dist")
+```
+Best with 3 components:
+```{r}
+list.keepX = tune.omics_t0$choice.keepX # set the optimal values of features to retain
+# set the optimised DIABLO model
+final.diablo.model = block.splsda(X = omics_t0_2, Y = Y, ncomp = 3, keepX = list.keepX, design = design)
+Sys.time()
+
+#Make plots
+plotDiablo(final.diablo.model, ncomp = 1)
+plotIndiv(final.diablo.model, ind.names = FALSE, legend = TRUE, 
+          title = 'DIABLO Sample Plots')
+#X11()
+#cimDiablo(final.diablo.model)
+```
+Plot AUC-ROC:
+```{r}
+auc.splsda_met = auroc(final.diablo.model, roc.block = "metabo", 
+                  roc.comp = 2, print = FALSE)
+auc.splsda_prot = auroc(final.diablo.model, roc.block = "prot46", 
+                  roc.comp = 2, print = FALSE)
+```
+
+###8.MOFA
+We need to use the transposed the data
+```{r}
+library(MOFA2)
+Sys.time()
+data_mofa_t0 = list(data_transposed_2_omics[[1]],data_transposed_2_omics[[2]])
+names(data_mofa_t0)<- c("metabo", "prot48")
+mofa_obj <- create_mofa(data_mofa_t0)
+plot_data_overview(mofa_obj)
+
+#Specify the model options
+##Default
+data_opts <- get_default_data_options(mofa_obj)
+
+model_opts <- get_default_model_options(mofa_obj)
+model_opts$num_factors <- 10
+
+train_opts <- get_default_training_options(mofa_obj)
+train_opts$seed <- 42
+
+#Start training the model
+mofa_obj <- prepare_mofa(mofa_obj, data_options = data_opts,
+                            model_options = model_opts, training_options = train_opts)
+outfile = file.path(getwd(),"model_10_6.hdf5") #save model
+MOFA_object_trained <- run_mofa(mofa_obj, outfile, use_basilisk=TRUE)
+Sys.time()
+```
+Make plots:
+```{r}
+plot_factor_cor(MOFA_object_trained)
+##max_r2= max variance 
+plot_variance_explained(MOFA_object_trained, max_r2 = 25)
+##total variance
+plot_variance_explained(MOFA_object_trained, plot_total = T)[[2]]
+```
+Factor 3 explains both of them
+```{r}
+plot_weights(MOFA_object_trained, view = "metabo", factor= 3, nfeatures = 10)
+plot_weights(MOFA_object_trained, view = "prot48", factor= 3, nfeatures = 10)
+```
+Plot heatmaps
+```{r}
+plot_data_heatmap(MOFA_object_trained, view = "metabo", factor = 3, features = 15,
+                  denoise = TRUE, cluster_rows= TRUE, cluster_cols= T, 
+                  show_rownames= TRUE, show_colnames=TRUE  ,scale="row")
+plot_data_heatmap(MOFA_object_trained, view = "prot48", factor = 3, features = 15,
+                  denoise = TRUE, cluster_rows= TRUE, cluster_cols= T,
+                  show_rownames= TRUE, show_colnames=TRUE  ,scale="row")
+```
+Now lets make clusters
+```{r}
+clusters_mofa_all <- cluster_samples(MOFA_object_trained, k=2, factor=c(2,3,6)) # we want 2 clusters
+clusters_mofadf_all <- data.frame(cluster=clusters_mofa_all$cluster)
+
+```
+
+Check results- difficult to plot
+```{r}
+subset_fact <- MOFA_object_trained@expectations$Z[["group1"]]
+colors_mofa <- c("darkorchid1","darkseagreen4")
+symbol <- c(16,8)
+par(mar=c(5, 4, 4, 8), xpd=TRUE)
+plot(subset_fact[,2], subset_fact[,3], xlab="Factor 2", ylab= "Factor 3", main="Plot Factor 2 vs Factor 3 in T0", pch=symbol[as.numeric(as.factor(samples_df_T0$treatment))], col=colors_mofa[clusters_mofadf_all$cluster])
+legend("topright", legend=c("Cluster 1","Cluster 2"), col=colors_mofa, pch=15, title="Clusters", inset=c(-0.25, 0))
+legend("bottomright", legend=unique(samples_df_T0$treatment), col="lightslategrey", pch=symbol, title="Treatment", inset=c(-0.3, 0))
+```
+###9.iClusterPlus:
+
+Samples need to be in rows so we do not need to modify the data
+```{r}
+library(iClusterPlus)
+library(gplots)
+library(latticeExtra)
+Sys.time()
+#try different k values and then compare the results
+#Clusters= k+1
+fit_c_1k <- iClusterPlus(dt1 = omics_t0_2$metabo, dt2 = omics_t0_2$prot46, type = c("gaussian","gaussian"), lambda = c(0.10,0.25), K=1, maxiter = 15)
+fit_c_1k$BIC
+fit_c_2k <- iClusterPlus(dt1 = omics_t0_2$metabo, dt2 = omics_t0_2$prot46, type = c("gaussian","gaussian"), lambda = c(0.10,0.25), K=2, maxiter = 15)
+fit_c_2k$BIC
+Sys.time()
+```
+Best with k=1 or 2 so we choose nºclusters=2
+Plot heatmap:
+```{r}
+plotHeatmap(fit = fit_c_1k, datasets = omics_t0_2, type = c("gaussian","gaussian"))
+```
+It is difficult to see if clusters are according to the true label
+```{r}
+true_label <- as.numeric(as.factor(samples_df_T0$treatment))
+icluster_cluster <- fit_c_1k$clusters
+```
+
+
+Now try with iClusterBayes:
+```{r}
+Sys.time()
+#try different k values and then compare the results
+#Clusters= k+1
+fit_bayes_1k <- iClusterBayes(dt1 = omics_t0_2$metabo, dt2 = omics_t0_2$prot46, type = c("gaussian","gaussian"), K=1)
+fit_bayes_1k$BIC
+fit_bayes_2k <- iClusterBayes(dt1 = omics_t0_2$metabo, dt2 = omics_t0_2$prot46, type = c("gaussian","gaussian"), K=2)
+fit_bayes_2k$BIC
+Sys.time()
+```
+
+Now make plots for k=1
+```{r}
+plotHMBayes(fit = fit_bayes_1k, datasets = omics_t0_2,type = c("gaussian","gaussian"))
+```
+
+Plot samples in PCA space and check with correct subtypes:
+```{r}
+par(mar=c(5, 4, 4, 8), xpd=TRUE)
+PC1 <- prcomp(omics_t0_2$metabo)
+
+#iclusterPlus
+plot(PC1$x[, 1], PC1$x[, 2], xlab = "PC 1", ylab = "PC 2", 
+     main = "PC plot of samples for iClusterPlus", col= color[fit_c_1k$clusters], pch=symbols[as.numeric(as.factor(samples_df_T0$treatment))])
+  
+legend(x="topright", inset=c(-0.3, 0), legend= unique(samples_df_T0$treatment), title= "Treatment", col = "ivory4", pch = symbols)
+legend(x="bottomright", inset=c(-0.25, 0), legend= c("Cluster 1", "Cluster 2"), title= "Clusters", col = color, pch=15)
+
+#iclusterbayes
+plot(PC1$x[, 1], PC1$x[, 2], xlab = "PC 1", ylab = "PC 2", 
+     main = "PC plot of samples for iClusterBayes", col= color[fit_bayes_1k$clusters], pch=symbols[as.numeric(as.factor(samples_df_T0$treatment))])
+  
+legend(x="topright", inset=c(-0.3, 0), legend= unique(samples_df_T0$treatment), title= "Treatment", col = "ivory4", pch = symbols)
+legend(x="bottomright", inset=c(-0.25, 0), legend= c("Cluster 1", "Cluster 2"), title= "Clusters", col = color, pch=15)
+```
+
+###10.BCC:
+For this we need samples in columns so we need the data transposed
+```{r}
+library(bayesCC)
+require(parallel)
+Sys.time()
+Ks <- 2:3 #try between 2 and 3 clusters to reduce computation time
+names(Ks)<- paste0("K",Ks)
+Results_2 <- mclapply(Ks, function(k){
+  bayesCC(as.matrix(data_transposed_2_omics), K=k, IndivAlpha = T,maxiter = 10000) # we may need to add as.matrix if it does not work
+})
+
+#Compute adherence
+meanAlphaStar <- c() #mean
+upperAlphaStar <- c() #upper
+lowerAlphaStar <- c() #lower
+
+for (k in Ks){
+  i <- names(Ks)[which(Ks==k)]
+  AlphaRaw <- (Results_2[[i]]$AlphaVec[,2000:10000]-1/k) /(1-1/k)
+  AlphaStar <- apply(AlphaRaw,2,mean)
+  meanAlphaStar[i]<- mean(AlphaStar)
+  upperAlphaStar[i]<- quantile(AlphaStar, 0.975)
+  lowerAlphaStar[i]<- quantile(AlphaStar, 0.025)
+}
+##plot
+plotCI(Ks, meanAlphaStar, ui= upperAlphaStar, li= lowerAlphaStar,
+       xlab = "Number of clusters (K)", ylab = "Mean adjusted adherence")
+Sys.time()
+```
+Almost same, so we choose 2 cluster
+```{r}
+K3_2 <- Results_2[[1]] #position 1
+K3_2$Alpha
+```
+Plot the results checking source and general clustering:
+```{r}
+# Create function to make the points plot
+plot_points <- function(PCs, cluster_col, cluster_row, color, shape) {
+  for (j in 1:2) {
+    points(PCs$x[K3$Cbest[, cluster_col] == 1 & K3$Lbest[[cluster_row]][, j] == 1, 1], 
+           PCs$x[K3$Cbest[, cluster_col] == 1 & K3$Lbest[[cluster_row]][, j] == 1, 2], 
+           col = color, pch = shape[j]) 
+  }
+}
+
+colors <- c("indianred", "lightskyblue")
+symbols <- c(16, 3)
+
+plot_pcs <- function(data, title, alpha_value, m) {
+  par(mar=c(5, 4, 4, 8), xpd=TRUE)
+  PCs <- prcomp(t(data))
+  plot(PCs$x[, 1], PCs$x[, 2], cex = 0, xlab = "PC 1", ylab = "PC 2", 
+       main = bquote(.(title) ~ (alpha == .(alpha_value))))
+  
+  for (i in 1:2) {
+    plot_points(PCs, i, m, colors[i], symbols)
+  }
+  legend(x="topright", inset=c(-0.3, 0), legend= unique(samples_df_T0$treatment), title= "Treatment", col = "ivory4", pch = symbols)
+  legend(x="bottomright", inset=c(-0.25, 0), legend= clustersbcc, title= "Clusters", col = colors, pch=15)
+}
+
+# metabo analysis
+plot_pcs(data_transposed_2_omics[[1]], "Metabo at T0", 0.653, 1)
+
+# proteo analysis
+plot_pcs(data_transposed_2_omics[[2]], "Proteo at T0", 0.884, 2)
+
+```
+##OTHER TESTS:
+###CONCORDANCE (ARI):
+Calculate adjusted rand index for all methods and see concordance, we want to create a matrix where both columns and rows are the different methods 
+```{r}
+#install.packages("cata")
+library(cata) 
+name_methods <- c("snf","nemo","mocluster","pinsplus","intnmf","mofa","iclusterplus","iclbayes","bayescc")
+clustering_methods <- list(
+  snf = group,
+  nemo = clustering_nemo_T0_2,
+  mocluster = cls,
+  pinsplus = cluster1,
+  intnmf = clusters_int,
+  mofa = clusters_mofa_all$cluster,
+  iclusterplus = icluster_cluster,
+  iclbayes = iclusterbayes_cluster,
+  bayescc = clusters_bcc
+)
+
+#Create matrix
+n <- length(name_methods)
+matrix_ARI <- matrix(0, nrow = n, ncol = n)
+matrix_pvalue <- matrix(0, nrow = n, ncol = n)
+rownames(matrix_ARI) <- name_methods
+colnames(matrix_ARI) <- name_methods
+rownames(matrix_pvalue) <- name_methods
+colnames(matrix_pvalue) <- name_methods
+
+#Fill matrices with ARI and pvalues
+for (i in 1:n) {
+  for (j in 1:n) {
+    ari <- ARI(clustering_methods[[i]], clustering_methods[[j]], signif = TRUE)
+    matrix_ARI[i, j] <- ari$ari
+    matrix_pvalue[i,j] <- ari$pvalue
+  }
+}
+
+#Print matrix
+#print(matrix_ARI)
+```
+
+Now let's check the concordance between the true values:
+```{r}
+#install.packages("fossil")
+#library("fossil")
+true_clustering <- as.numeric(as.factor(samples_df_T0$treatment))
+
+#Calculate ARI values for true clusters
+matrix_ARI_true <- matrix(0, nrow = 3, ncol = n) #we want  one row for the true clustering and another for the p-value and 9 columns for the methods
+rownames(matrix_ARI_true) <- c("True_cluster-ARI", "p-value","rand-index")
+colnames(matrix_ARI_true) <- name_methods
+
+#Fill matrix
+for (j in 1:n){
+  ari <- ARI(true_clustering, clustering_methods[[j]], signif = TRUE)
+  matrix_ARI_true[1,j] <- ari$ari
+  matrix_ARI_true[2,j] <- ari$pvalue
+  matrix_ARI_true[3,j] <- rand.index(true_clustering, clustering_methods[[j]])
+}
+```
+
+###Add metadata
+- if patient is allergic or not (in mepo there are patients that are not allergic)
+- comorbidities to check if that makes mepo cluster differently
+All Oma has no comorbities except 3 samples, and mepo is 50-50.
+```{r}
+#First get common samples for the metadata
+# Function to standardize names in metadata_df
+standardize_names <- function(name) {
+  # Use a regular expression to capture the parts and remove leading zeros
+  return(sub("(O|M)-T0-0*(\\d+)", "\\1\\2", name))
+}
+
+# Apply the function to the sample names and convert the result to a vector
+standard_names <- unlist(lapply(samples_df_T0$sample, standardize_names))
+```
+
+Now we have the names standarized and we want to see if there is any metadata that could be relevant to the samples not classified properly:
+- load comorbidities
+```{r}
+comorbidities <- read.csv('Comorbilidades_Biologicos.csv',header=TRUE, sep = ';')
+
+```
+
+Join comorbilities to  standard names:
+```{r}
+samples_with_metadata <- data.frame("samples"=standard_names)
+samples_with_metadata <- merge(samples_with_metadata, comorbidities, by.x = "samples", by.y = "ID", all.x = TRUE)
+```
+
+Now we can add other metadata:
+- allergy, age, basal igE and Eosinophils_T0
+```{r}
+#Create metadata df with only desired columns
+metadata_df <- data.frame("ID"=metadata$Patient_ID,"Age" = metadata$Age, "Allergic"=metadata$Allergic, "Basal_igE" = metadata$Basal_IgE, "Eosinophils"=metadata$Eosinophils_T0)
+samples_with_metadata <- merge(samples_with_metadata, metadata_df, by.x = "samples", by.y = "ID", all.x = TRUE)
+print(samples_with_metadata)
+```
+
+###ADDITIONAL PLOTS:
+mixOmics plot for sPLS and check "clustering": we decided to plot the resulting model and see if by plotting an horizontal line we can check the division between treatments
+```{r}
+p <- plotIndiv(final.spls.2omics, ind.names = TRUE,  rep.space = "X-variate", group = samples_df_T0$treatment,       col.per.group = color.mixo(1:2), legend = TRUE, legend.title = 'Treatment', plot=FALSE)
+
+p$graph + geom_hline(yintercept = 0.3, color = "red", linetype = "dashed")
+```
+Make correlation plots with ARI values: to have the graphically explain by adding as well the p-values
+```{r}
+library(corrplot)
+corrplot(matrix_ARI, col = COL2('BrBG'), method = 'color', tl.col = "black", p.mat = matrix_pvalue, sig.level = -1,insig = 'p-value')
+```
+Plot MOFA with sample names: and check if it corresponds to the same as in mixomics, mocluster and intnmf
+```{r}
+par(mar=c(4, 4, 4, 8), xpd=TRUE)
+color_samples <- c("darkblue","darkorange2")
+plot(subset_fact[,2], subset_fact[,3], xlab="Factor 2", ylab= "Factor 3", main="Plot Factor 2 vs Factor 3 in T0", pch=16, col=colors_mofa[clusters_mofadf_all$cluster])
+text(subset_fact[,2], subset_fact[,3],labels = samples_df_T0$sample,cex = 0.6, pos = 4, col = color_samples[as.numeric(as.factor(samples_df_T0$treatment))])
+legend("topright", legend=c("Cluster 1","Cluster 2"), col=colors_mofa, pch=15, title="Clusters", inset=c(-0.25, 0))
+```
+Check common things between not-properly clustered samples:
+```{r}
+#Samples of mepolizumab that were not properly clustered (in moCluster, intNMF, MOFA and mixOmics)
+samples_bad_df <- data.frame("sample"=c("M6","M11","M20","M30","M33","O8","O10","O12","O18","O22"))
+merged_samples_bad <- merge(samples_bad_df, metadata_df,by.x = "sample", by.y = "ID", all.x = TRUE)
+
+```
+
+
