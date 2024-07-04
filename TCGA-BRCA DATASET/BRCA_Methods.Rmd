@@ -1,0 +1,1017 @@
+---
+title: "TCGA-BRCA"
+author: "Silvia Garces"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## TCGA-BRCA DATASET:
+With this dataset we intend to cluster the different samples and check if the clusters correspond to the original cancer subtypes: HER2, Basal, Luminal A and Luminal B
+
+
+Load necessary libraries:
+```{r}
+library(ggplot2)
+library(bayesCC)
+library(mixOmics)
+library(MOFA2)
+library(NEMO)
+library(SNFtool)
+library(omicade4)
+library(mogsa)
+library(IntNMF)
+library(PINSPlus)
+library(iClusterPlus)
+
+```
+
+The data has the samples as columns and the variables as rows. 
+First we need to read the data (from bayesCC package):
+```{r BRCAData}
+data(BRCAData)
+#[mrna, dna methylation, mirna, protein]
+```
+
+This data contains 348 samples.
+We load the clustering done by TCGA so we can compare our results:
+```{r}
+table_TCGA_subtypes <- read_delim("TFM_PRACTICAS/table_TCGA_subtypes.csv", delim = ";", escape_double = FALSE, trim_ws = TRUE)
+subtype <- table_TCGA_subtypes$Cluster #get subtype
+ids <- table_TCGA_subtypes$ID
+ids <- gsub("-", ".", as.character(ids))
+namesExp <- colnames(BRCAData[[1]])
+namesExp2 <- substr(namesExp,1,12)
+MatchSub <- match(namesExp2, ids, nomatch = 0) #match names
+sum(ids[MatchSub] == namesExp2)
+subtype <- subtype[MatchSub] #get original groups (1, 2, 3, 4)
+subtypes <- c("HER2","Basal","Luminal A", "Luminal B") #get labels for each group
+```
+
+
+##Start methods
+###1. SNF: 
+For this method we need to separate the data into 4 and the calculate the distance for each of the matrices
+Main problem --> We have to transpose the matrices as SNF needs the samples to be in rows 
+```{r}
+Sys.time() #to calculate running time
+
+Dist1 = (dist2(as.matrix(t(BRCAData[[1]])), as.matrix(t(BRCAData[[1]]))))^(1/2)
+Dist2 = (dist2(as.matrix(t(BRCAData[[2]])), as.matrix(t(BRCAData[[2]]))))^(1/2)
+Dist3 = (dist2(as.matrix(t(BRCAData[[3]])), as.matrix(t(BRCAData[[3]]))))^(1/2)
+Dist4 = (dist2(as.matrix(t(BRCAData[[4]])), as.matrix(t(BRCAData[[4]]))))^(1/2)
+
+K=20 #number of neighbors
+sigma=0.5
+
+W1 = affinityMatrix(Dist1, K, sigma)
+W2 = affinityMatrix(Dist2, K, sigma)
+W3 = affinityMatrix(Dist3, K, sigma)
+W4 = affinityMatrix(Dist4, K, sigma) 
+
+
+W_joined <- SNF(list(W1,W2,W3,W4), K, 10) #generate model
+
+estimateNumberOfClustersGivenGraph(W_joined, 2:5)
+Sys.time()
+```
+Select number of optimal clusters = 2
+```{r}
+C=2 #number of clusters
+group=spectralClustering(W_joined,C) #generate clusters
+displayClusters(W_joined,group)
+```
+Check with true labels and plot:
+```{r}
+M_label=cbind(group, subtype)
+colnames(M_label)=c("spectralClustering","TrueLabel")
+rownames(M_label)=namesExp
+M_label_colors=cbind("spectralClustering"=getColorsForGroups(M_label[,"spectralClustering"],
+colors=c("blue","red")),"TrueLabel"=getColorsForGroups(M_label[,"TrueLabel"], colors = c("green","violet","orange","grey3")))
+
+#Make plot
+layout(matrix(c(1,2), ncol=2, byrow=TRUE))
+par(mar=c(5, 4, 4, 2))
+displayClustersWithHeatmap(W_joined, group, M_label_colors)
+par(mar=c(0,0,0,0))
+plot(1, type = "n", axes=F, xlab="", ylab="") # Create empty plot
+legend(x="top", legend=unique(group), fill=unique(M_label_colors[,"spectralClustering"]), title = "SNF clusters", bg="transparent", horiz=TRUE)
+legend(x="center", legend=subtype_labels, fill= c("green","violet","orange","grey3"), title = "TCGA subtypes", bg="transparent", horiz=TRUE)
+
+```
+
+Compare with TCGA subtypes:
+```{r}
+# Assign labels
+subtype_labels <- c("Her2", "Basal", "LumA", "LumB")
+cluster_labels_snf <- c("Cluster 1", "Cluster 2")
+
+Clusters_snf <- rep(1, 348)
+Clusters_snf[group == 2] <- 2
+#Clusters_nemo[cls == 3] <- 3
+#Clusters_nemo[cls == 4] <- 4
+# ConfusionMat: All
+confmat_snf <- matrix(nrow = 4, ncol = 2)
+for (i in 1:4) {
+  for (j in 1:2) {
+    confmat_snf[i, j] <- sum(subtype == i & Clusters_snf == j)
+  }
+}
+# Assign names
+rownames(confmat_snf) <- subtype_labels
+colnames(confmat_snf) <- cluster_labels_snf
+```
+
+###2. NEMO:
+With this method we will compute the affinity graph, we can use data without transposing - samples in columns
+```{r}
+Sys.time() #calculate running time
+affinity_graph <- nemo.affinity.graph(BRCAData, k= 20) #k corresponds with number of neighbors to make matrix
+num_clusters <- nemo.num.clusters(affinity_graph)
+clustering_nemo <- nemo.clustering(BRCAData, num.clusters = num_clusters, num.neighbors = 5)
+Sys.time()
+
+
+```
+Plot heatmap with different colors for clusters
+```{r}
+NEMO_label=cbind(clustering_nemo, subtype)
+colnames(NEMO_label)=c("nemoClustering","TrueLabel")
+rownames(NEMO_label)=namesExp
+NEMO_label_colors=cbind("nemoClustering"=getColorsForGroups(NEMO_label[,"nemoClustering"],
+colors=c("blue","red")),"TrueLabel"=getColorsForGroups(NEMO_label[,"TrueLabel"], colors = c("green","violet","orange","grey3")))
+
+
+displayClustersWithHeatmap(affinity_graph, clustering_nemo, NEMO_label_colors)
+plot.new()
+legend(x="top", legend=unique(group), fill=unique(NEMO_label_colors[,"nemoClustering"]), title = "NEMO clusters", bg="transparent", horiz=TRUE, cex=0.8)
+legend(x="center", legend=subtype_labels, fill= c("green","violet","orange","grey3"), title = "TCGA subtypes", bg="transparent", horiz=TRUE, cex=0.8)
+
+```
+
+Compare clusterings with TCGA subtypes
+```{r}
+# Assign labels
+subtype_labels <- c("Her2", "Basal", "LumA", "LumB")
+cluster_labels_nemo <- c("Cluster 1", "Cluster 2")
+
+Clusters_nemo <- rep(1, 348)
+Clusters_nemo[clustering_nemo == 2] <- 2
+#Clusters_nemo[cls == 3] <- 3
+#Clusters_nemo[cls == 4] <- 4
+# ConfusionMat: All
+confmat_nemo <- matrix(nrow = 4, ncol = 2)
+for (i in 1:4) {
+  for (j in 1:2) {
+    confmat_nemo[i, j] <- sum(subtype == i & Clusters_nemo == j)
+  }
+}
+# Assign names
+rownames(confmat_nemo) <- subtype_labels
+colnames(confmat_nemo) <- cluster_labels_nemo
+```
+
+###3. MCIA:
+For this method the data can be used as it is as the samples are already in columns
+```{r}
+Sys.time() #calculate computation time
+mcoin <- mcia(BRCAData)
+Sys.time()
+
+```
+
+Now make the plots: these ones are difficult to understand
+```{r}
+plot.mcia(mcoin,axes = 1:2 , phenovec = subtype, sample.lab = FALSE, df.color = 1:4)
+plotVar(mcoin, var=NA, bg.var.col=1:4, var.lab=TRUE)
+```
+Make plots using 2 latent variables to check possible clusters
+```{r}
+color <- c("olivedrab","burlywood","deepskyblue","maroon")
+subset_mcia <- mcoin$mcoa$SynVar
+par(mar=c(5, 4, 4, 8), xpd=TRUE)
+plot(subset_mcia[, 1], subset_mcia[,2], xlab= "Variable 1", ylab= "Variable 2", col=color[subtype], pch=20, main = "Plot of samples")
+legend("right", legend=subtype_labels, col=color,pch=20, title="TCGA subtypes", inset=c(-0.3, 0))
+```
+###4. moCluster:
+No need to modify the data as samples need to be in columns
+```{r}
+Sys.time() #for the running time
+#Make model using 10 comps
+moa <- mbpca(BRCAData, ncomp=10, k="all", method = "globalScore", option = "lambda1",center=TRUE, scale= FALSE, moa= TRUE, svd.solver = "fast", maxiter = 1000)
+plot(moa, value="eig", type=2)
+
+#Search for appropriate number of components
+r <- bootMbpca(moa, mc.cores = 1, B=20, replace = FALSE, resample = "sample")
+```
+Choose best number of components = 3
+```{r}
+#Create model for 3 components
+moa_3var <- mbpca(BRCAData, ncomp=3, k=0.1, method = "globalScore", option = "lambda1",center=TRUE, scale= FALSE, moa= TRUE, svd.solver = "fast", maxiter = 1000)
+
+scr <- moaScore(moa)
+scrs <-moaScore(moa_3var)
+
+#do correlation
+diag(cor(scr[, 1:3], scrs))
+
+#Do hierarchical cluster and plot
+hcl <- hclust(dist(scrs))
+cls <- cutree(hcl, k=4) #Select number of clusters, we want 4
+Sys.time()
+
+#Plot the results obtained with 3 components
+clsColor <- as.factor(cls)
+levels(clsColor) <- c("red","blue","orange", "pink")
+clsColor<- as.character((clsColor))
+```
+Plot heatmap and add legend:
+```{r}
+heatmap(t(scrs[hcl$order, ]), ColSideColors = clsColor[hcl$order], Rowv = NA, Colv=NA)
+legend(x= "right", legend = c("Cluster 1","Cluster 2", "Cluster 3", "Cluster 4"), col = c("red","blue","orange", "pink"), pch= 15)
+```
+Plot samples in PCA space with subtypes and cluster:
+```{r}
+symbols <- c(16, 3, 8, 5)
+par(mar=c(5, 4, 4, 8), xpd=TRUE)
+plot(scrs[, 1:2], col=clsColor, pch=symbols[subtype], main = "PC1 and PC2")
+legend("topright", legend=c("Cluster 1","Cluster 2", "Cluster 3", "Cluster 4"), col=unique(clsColor), pch=15, title="Clusters", inset=c(-0.25, 0))
+legend("bottomright", legend=subtype_labels, col=c("lightslategrey"), pch=symbols, title="Subtypes", inset=c(-0.25, 0))
+
+par(mar=c(5, 4, 4, 8), xpd=TRUE)
+plot(scrs[, 2:3], col=clsColor, pch=symbols[subtype], main = "PC2 and PC3")
+legend("topright", legend=c("Cluster 1","Cluster 2", "Cluster 3", "Cluster 4"), col=unique(clsColor), pch=15, title="Clusters", inset=c(-0.25, 0))
+legend("bottomright", legend=subtype_labels, col=c("lightslategrey"), pch=symbols, title="Subtypes", inset=c(-0.25, 0))
+
+```
+
+Check clusters with TCGA subtypes:
+```{r}
+# Assign labels
+subtype_labels <- c("Her2", "Basal", "LumA", "LumB")
+cluster_labels <- c("Cluster 1", "Cluster 2", "Cluster 3", "Cluster 4")
+
+Clusters_mo <- rep(1, 348)
+Clusters_mo[cls == 2] <- 2
+Clusters_mo[cls == 3] <- 3
+Clusters_mo[cls == 4] <- 4
+# ConfusionMat: All
+confmat_mo <- matrix(nrow = 4, ncol = 4)
+for (i in 1:4) {
+  for (j in 1:4) {
+    confmat_mo[i, j] <- sum(subtype == i & Clusters_mo == j)
+  }
+}
+# Assign names
+rownames(confmat_mo) <- subtype_labels
+colnames(confmat_mo) <- cluster_labels
+```
+
+###5. PINSPlus:
+We need to modify the data so samples are in rows- transpose data
+```{r}
+Sys.time()
+data1<- t(BRCAData[[1]])
+data2<- t(BRCAData[[2]])
+data3<- t(BRCAData[[3]])
+data4<- t(BRCAData[[4]])
+dataList <- list(data1,data2,data3,data4) #make list with transposed data
+#Use following function as we have multi-omics data
+pins_cluster <- SubtypingOmicsData(dataList =dataList , clusteringMethod = "kmeans", kMax=4) #Select number of clusters
+
+Sys.time()
+
+#Two  clustering outputs
+cluster1 <- pins_cluster$cluster1
+cluster2 <- pins_cluster$cluster2
+
+# Plot the clusters for Stage I using a scatter plot
+plot(cluster1, pch = 16, col = "blue", main = "Cluster Plot (Stage I)", xlab = "Sample", ylab = "Cluster")
+# Plot the clusters for Stage II using a scatter plot
+plot(cluster2, pch = 16, col = "red", main = "Cluster Plot (Stage II)", xlab = "Sample", ylab = "Cluster")
+```
+Plot PCA for first 2 components to check distribution of samples:
+```{r}
+# Subset the first two columns of the 'x' matrix (which are the PCA)
+subset_x <- pins_cluster[["dataTypeResult"]][[1]][["pca"]][["x"]]
+cluster_colors <- c("coral", "cadetblue3") #There are only two clusters
+symbols <- c(16, 3, 8, 5)
+# Plot PC1 vs PC2
+par(mar=c(5, 4, 4, 8), xpd=TRUE)
+plot(subset_x[, 1], subset_x[, 2], 
+     xlab="PC1", ylab="PC2", 
+     main="Plot of samples in PC1 vs PC2", 
+     pch=symbols[subtype], col=cluster_colors[cluster1])
+legend("topright", legend=c("Cluster 1","Cluster 2"), col=cluster_colors, pch=15, title="Clusters", inset=c(-0.25, 0))
+legend("bottomright", legend=subtype_labels, col="lightslategrey", pch=symbols, title="Subtypes", inset=c(-0.25, 0))
+```
+
+Compare cluster obtained with TCGA subtypes:
+```{r}
+# Assign labels
+subtype_labels <- c("Her2", "Basal", "LumA", "LumB")
+cluster_labels <- c("Cluster 1", "Cluster 2", "Cluster 3", "Cluster 4")
+
+Clusters_pins <- rep(1, 348)
+Clusters_pins[cluster1 == 2] <- 2
+Clusters_pins[cluster1 == 3] <- 3
+Clusters_pins[cluster1 == 4] <- 4
+# ConfusionMat: All
+confmat_pins <- matrix(nrow = 4, ncol = 4)
+for (i in 1:4) {
+  for (j in 1:4) {
+    confmat_pins[i, j] <- sum(subtype == i & Clusters_pins == j)
+  }
+}
+# Assign names
+rownames(confmat_pins) <- subtype_labels
+colnames(confmat_pins) <- cluster_labels
+
+```
+
+
+###6. intNMF:
+Samples should be on rows so we need to modify the data, moreover we need to make the data positive, as the program does not work with negative values.Use data from PINSPlus (already transposed)
+
+```{r}
+Sys.time() #running time
+#check if there is any negative value
+if (!all(data1>=0)){
+  data1_pos <- pmax(data1 + abs(min(data1)), .Machine$double.eps)
+} else {
+  data1_pos <- data1
+}
+if (!all(data2>=0)){
+  data2_pos <- pmax(data2 + abs(min(data2)), .Machine$double.eps)
+} else {
+  data2_pos <- data2
+}
+if (!all(data3>=0)){
+  data3_pos <- pmax(data3 + abs(min(data3)), .Machine$double.eps)
+} else {
+  data3_pos <- data3
+}
+if (!all(data4>=0)){
+  data4_pos <- pmax(data4 + abs(min(data4)), .Machine$double.eps)
+} else {
+  data4_pos <- data4
+}
+
+dat <- list(data1_pos,data2_pos,data3_pos,data4_pos) #make list with positive data
+
+#Get optimum number of clusters: nmf.opt.k
+opt_k<- nmf.opt.k(dat=dat, n.runs = 5, n.fold = 5, k.range = 2:7, result = TRUE, 
+                  make.plot = TRUE, progress = TRUE)
+
+Sys.time()
+```
+Check number of optimal clusters=4
+```{r}
+#We check and the optimal is 4
+fit <- nmf.mnnals(dat=dat, k=4, maxiter = 200, st.count = 20, n.ini = 15, ini.nndsvd = TRUE, seed = TRUE)
+
+#Plot matrix
+ConsensusMatPlot(fit, colLab = TRUE, rowLab = TRUE)
+```
+
+
+Plot the clusters obtained in factorial space:
+```{r}
+clusters_int <- fit$clusters
+subsets_df <- fit$W #get the basis matrix for the different datasets
+clus_colors <- c("darkorange1", "deepskyblue", "gold", "lightpink3")
+symbols <- c(16, 3, 8, 5)
+# Plot Factor 1 vs Factor 2
+par(mar=c(5, 4, 4, 8), xpd=TRUE)
+plot(subsets_df[, 1], subsets_df[, 2], 
+     xlab="Factor 1", ylab="Factor 2", 
+     main="Plot of Factor 1 vs Factor 2", 
+     pch=symbols[subtype], col=clus_colors[clusters_int])
+legend("topright", legend=c("Cluster 1","Cluster 2", "Cluster 3", "Cluster 4"), col=clus_colors, pch=15, title="Clusters", inset=c(-0.25, 0))
+legend("bottomright", legend=subtype_labels, col="lightslategrey", pch=symbols, title="Subtypes", inset=c(-0.25, 0))
+
+# Plot Factor 3 vs Factor 4
+par(mar=c(5, 4, 4, 8), xpd=TRUE)
+plot(subsets_df[, 3], subsets_df[, 4], 
+     xlab="Factor 3", ylab="Factor 4", 
+     main="Plot of Factor 3 vs Factor 4", 
+     pch=symbols[subtype], col=clus_colors[clusters_int])
+legend("topright", legend=c("Cluster 1","Cluster 2", "Cluster 3", "Cluster 4"), col=clus_colors, pch=15, title="Clusters", inset=c(-0.25, 0))
+legend("bottomright", legend=subtype_labels, col="lightslategrey", pch=symbols, title="Subtypes", inset=c(-0.25, 0))
+```
+
+Compare plots with TCGA subtype:
+```{r}
+# Assign labels
+subtype_labels <- c("Her2", "Basal", "LumA", "LumB")
+cluster_labels <- c("Cluster 1", "Cluster 2", "Cluster 3", "Cluster 4")
+
+Clusters_nmf <- rep(1, 348)
+Clusters_nmf[fit$cluster == 2] <- 2
+Clusters_nmf[fit$cluster == 3] <- 3
+Clusters_nmf[fit$cluster == 4] <- 4
+# ConfusionMat: All
+confmat_nmf <- matrix(nrow = 4, ncol = 4)
+for (i in 1:4) {
+  for (j in 1:4) {
+    confmat_nmf[i, j] <- sum(subtype == i & Clusters_nmf == j)
+  }
+}
+# Assign names
+rownames(confmat_nmf) <- subtype_labels
+colnames(confmat_nmf) <- cluster_labels
+```
+
+###7. MixOmics:
+For this we need to specify the names of the different omics, moreover samples are on rows so we need to transpose the data
+```{r}
+X1 <- t(BRCAData[[1]]) #mrna
+X2 <- t(BRCAData[[2]]) #dna meth
+X3 <- t(BRCAData[[3]]) #mirna
+X4 <- t(BRCAData[[4]]) #protein
+X<- list(mrna=X1, dnamet=X2, mirna=X3, protein=X4)
+ 
+```
+
+For these data we need to use the unsupervised method, with multi-block PLS using all the different variables
+```{r}
+Sys.time() #for the running time
+block.pls.result <- block.pls(X,indY=4, design="full")
+Sys.time()
+plotIndiv(block.pls.result, group = subtype_labels[subtype], ind.names= FALSE, legend = TRUE, legend.title = "Subtypes")
+plotVar(block.pls.result, legend = TRUE)
+
+```
+
+Now we select the variables by using Multi-block sPLS:
+```{r}
+##Perform multiblock sPLS: we set the number of features to use
+#If we use indY we do not use keepY, only keepX so we need to make sure to include all the variables in the list
+Sys.time() #for the running time
+list.keepX <- list(mrna=rep(10,2), dnamet=rep(10,2),mirna=rep(10,2), protein=rep(10,2))
+#list.keepY <- c(rep(10,2))
+
+block.spls.result <- block.spls(X,indY=4, design="full",keepX = list.keepX)
+Sys.time()
+
+###plot
+plotIndiv(block.spls.result,group = subtype_labels[subtype], ind.names= FALSE, legend = TRUE, legend.title = "Subtypes")
+plotVar(block.spls.result, title= "PLS Correlations - no cutoff",legend = TRUE)
+plotVar(block.spls.result, title= "PLS Correlations - 0.5 cutoff",cutoff=0.5, legend = TRUE)
+```
+Try doing supervised learning as we know the true values, for this we need to have a train and test dataset so we would need to separate the data into two. 
+```{r}
+Sys.time() #running time
+Y_label <- subtype_labels[subtype]
+design = matrix(0.1, ncol = length(X), nrow = length(X), 
+                dimnames = list(names(X), names(X)))
+diag(design) = 0 # set diagonal to 0s
+basic.diablo.model = block.splsda(X = X, Y = Y_label, ncomp = 5, design = design)
+# run component number tuning with repeated CV
+perf.diablo = perf(basic.diablo.model, validation = 'Mfold', 
+                   folds = 10, nrepeat = 10)
+plot(perf.diablo)
+
+#Set optimal number of components
+ncomp <- perf.diablo$choice.ncomp$WeightedVote["Overall.BER", "centroids.dist"]
+# set grid of values for each component
+test.keepX = list (mrna = rep(10,2), 
+                   dnamet = rep(10,2),
+                   mirna = rep(10,2),
+                   protein= rep(10,2))
+
+# run the feature selection tuning - takes a long time
+#tune.TCGA = tune.block.splsda(X = X, Y = Y_label, ncomp = ncomp, 
+#                              test.keepX = test.keepX, design = design,
+#                              validation = 'Mfold', folds = 10, nrepeat = 1,
+#                              dist = "centroids.dist")
+#list.keepX = tune.TCGA$choice.keepX # set the optimal values of features to retain
+#Create final model
+final.diablo.model = block.splsda(X = X, Y = Y_label, ncomp = ncomp, 
+                          keepX = test.keepX, design = design)
+Sys.time()
+```
+Make plots for DIABLO's output
+```{r}
+plotDiablo(final.diablo.model, ncomp = 1)
+plotIndiv(final.diablo.model, ind.names = FALSE, legend = TRUE, 
+          title = 'Plot for each dataset')
+plotArrow(final.diablo.model, ind.names = FALSE, legend = TRUE, 
+          title = 'DIABLO')
+plotLoadings(final.diablo.model, comp = 1, contrib = 'max', method = 'median') # to check contribution of features for each dataset
+```
+Heatmap: this is done in the console
+X11()
+cimDiablo(final.diablo.model, comp = 1, legend.position = "right")
+
+Now check performance and AUC:
+```{r}
+# run repeated CV performance evaluation
+perf.diablo = perf(final.diablo.model, validation = 'Mfold', 
+                   M = 10, nrepeat = 10, 
+                   dist = 'centroids.dist') 
+
+perf.diablo$MajorityVote.error.rate
+```
+
+Plot AUC for each dataset:
+```{r}
+auc.splsda = auroc(final.diablo.model, roc.block = "mrna", 
+                   roc.comp = 2, print = FALSE)
+auc.splsda = auroc(final.diablo.model, roc.block = "dnamet", 
+                   roc.comp = 2, print = FALSE)
+auc.splsda = auroc(final.diablo.model, roc.block = "mirna", 
+                   roc.comp = 2, print = FALSE)
+auc.splsda = auroc(final.diablo.model, roc.block = "protein", 
+                   roc.comp = 2, print = FALSE)
+```
+
+###8. MOFA
+We do not need to modify the structure of the data
+```{r}
+Sys.time()
+data_mofa = BRCAData
+names(data_mofa) <- c("mrna", "dnamet", "mirna", "prot")
+mofa_obj <- create_mofa(data_mofa)
+plot_data_overview(mofa_obj)
+#Specify the options
+##Default
+data_opts <- get_default_data_options(mofa_obj)
+
+model_opts <- get_default_model_options(mofa_obj)
+model_opts$num_factors <- 10
+
+train_opts <- get_default_training_options(mofa_obj)
+train_opts$seed <- 42
+
+#Start training the model
+mofa_obj <- prepare_mofa(mofa_obj, data_options = data_opts,
+                            model_options = model_opts, training_options = train_opts)
+outfile = file.path(getwd(),"model_15_4.hdf5") #save model for future use
+MOFA_object_trained <- run_mofa(mofa_obj, outfile, use_basilisk=TRUE)
+Sys.time()
+```
+
+Generate plots and check factors:
+```{r}
+plot_factor_cor(MOFA_object_trained)
+##max_r2= maximum percentage of variance
+plot_variance_explained(MOFA_object_trained, max_r2 = 25)
+###Factor 1 is the one with more explained variance for all the different datasets
+
+##total variance
+plot_variance_explained(MOFA_object_trained, plot_total = T)[[2]]
+```
+
+Plot the weights to see which variables have higher weights in the factor
+```{r}
+plot_weights(MOFA_object_trained, view = "mrna", factor= 1, nfeatures = 10)
+plot_weights(MOFA_object_trained, view = "dnamet", factor= 1, nfeatures = 10)
+plot_weights(MOFA_object_trained, view = "mirna", factor= 1, nfeatures = 10)
+plot_weights(MOFA_object_trained, view = "prot", factor= 1, nfeatures = 10)
+```
+Plot heatmaps
+```{r}
+plot_data_heatmap(MOFA_object_trained, view = "mrna", factor = 1, features = 25,
+                  denoise = TRUE, cluster_rows= TRUE, cluster_cols= TRUE, 
+                  show_rownames= TRUE, show_colnames=FALSE  ,scale="row")
+plot_data_heatmap(MOFA_object_trained, view = "dnamet", factor = 1, features = 25,
+                  denoise = TRUE, cluster_rows= TRUE, cluster_cols= TRUE, 
+                  show_rownames= TRUE, show_colnames=FALSE  ,scale="row")
+plot_data_heatmap(MOFA_object_trained, view = "mirna", factor = 1, features = 25,
+                  denoise = TRUE, cluster_rows= TRUE, cluster_cols= TRUE, 
+                  show_rownames= TRUE, show_colnames=FALSE  ,scale="row")
+plot_data_heatmap(MOFA_object_trained, view = "prot", factor = 1, features = 25,
+                  denoise = TRUE, cluster_rows= TRUE, cluster_cols= TRUE, 
+                  show_rownames= TRUE, show_colnames=FALSE  ,scale="row")
+```
+Generate clusters and plot them:
+```{r}
+set.seed(32)
+clusters_mofa_all <- cluster_samples(MOFA_object_trained, k=4, factor="all") #needs to select clusters beforehand
+clusters_mofadf_all <- data.frame(cluster=clusters_mofa_all$cluster)
+ggplot(clusters_mofadf_all, aes(x = factor(cluster), fill = factor(cluster))) + 
+  geom_bar() +
+  labs(title = "Cluster Distribution for all factors",
+       x = "Cluster",
+       y = "Count") +
+  scale_fill_discrete(name = "Cluster")
+
+clusters_mofa_1 <- cluster_samples(MOFA_object_trained, k=4, factor=1)
+clusters_mofadf_1 <- data.frame(cluster=clusters_mofa_1$cluster)
+ggplot(clusters_mofadf_1, aes(x = factor(cluster), fill = factor(cluster))) + 
+  geom_bar() +
+  labs(title = "Cluster Distribution for Factor 1",
+       x = "Cluster",
+       y = "Count") +
+  scale_fill_discrete(name = "Cluster")
+
+
+```
+Plot factor 1 vs factor 3:
+```{r}
+subset_fact <- MOFA_object_trained@expectations$Z[["group1"]]
+colors_mofa <- c("darkorchid1","darkseagreen4","lightsalmon1", "powderblue")
+par(mar=c(5, 4, 4, 8), xpd=TRUE)
+plot(subset_fact[,1], subset_fact[,3], xlab="Factor1", ylab= "Factor 3", main="Plot Factor 1 vs Factor 3",
+     pch=symbols[subtype], col=colors_mofa[clusters_mofadf_1$cluster])
+legend("topright", legend=c("Cluster 1","Cluster 2", "Cluster 3", "Cluster 4"), col=colors_mofa, pch=15, title="Clusters", inset=c(-0.25, 0))
+legend("bottomright", legend=subtype_labels, col="lightslategrey", pch=symbols, title="Subtypes", inset=c(-0.25, 0))
+```
+Now with ggplot
+```{r}
+ggplot(data = as.data.frame(subset_fact), aes(x = Factor1, y = Factor3)) +
+  geom_point(aes(shape=as.factor(subtype), color=as.factor(clusters_mofadf_1$cluster))) +
+  scale_shape_manual(values=symbols, labels = subtype_labels)+
+  labs(x = "Factor1", y = "Factor3", title = "Plot Factor 1 vs Factor 3", color = "Clusters", shape = "Subtypes")
+```
+
+Compare clusters with TCGA subtypes
+```{r}
+# Assign labels
+subtype_labels <- c("Her2", "Basal", "LumA", "LumB")
+cluster_labels <- c("Cluster 1", "Cluster 2", "Cluster 3", "Cluster 4")
+
+Clusters_mofa <- rep(1, 348)
+Clusters_mofa[clusters_mofadf_1$cluster == 2] <- 2
+Clusters_mofa[clusters_mofadf_1$cluster == 3] <- 3
+Clusters_mofa[clusters_mofadf_1$cluster == 4] <- 4
+# ConfusionMat: All
+confmat_mofa <- matrix(nrow = 4, ncol = 4)
+for (i in 1:4) {
+  for (j in 1:4) {
+    confmat_mofa[i, j] <- sum(subtype == i & Clusters_mofa == j)
+  }
+}
+# Assign names
+rownames(confmat_mofa) <- subtype_labels
+colnames(confmat_mofa) <- cluster_labels
+
+```
+
+###9. BCC: 
+There is no need to modify the data as it is originally from this package
+We found that the best are 4 clusters so we need to modify the code.
+This takes approximately 1 hour to run
+```{r}
+require(parallel)
+Sys.time()
+Ks <- 2:4
+names(Ks)<- paste0("K",Ks)
+Results <- mclapply(Ks, function(k){
+  bayesCC(BRCAData, K=k, IndivAlpha = T,maxiter = 10000)
+})
+
+#Compute adherence
+meanAlphaStar <- c() #mean
+upperAlphaStar <- c() #upper
+lowerAlphaStar <- c() #lower
+
+for (k in Ks){
+  i <- names(Ks)[which(Ks==k)]
+  AlphaRaw <- (Results[[i]]$AlphaVec[,2000:10000]-1/k) /(1-1/k)
+  AlphaStar <- apply(AlphaRaw,2,mean)
+  meanAlphaStar[i]<- mean(AlphaStar)
+  upperAlphaStar[i]<- quantile(AlphaStar, 0.975)
+  lowerAlphaStar[i]<- quantile(AlphaStar, 0.025)
+}
+##plot
+plotCI(Ks, meanAlphaStar, ui= upperAlphaStar, li= lowerAlphaStar,
+       xlab = "Number of clusters (K)", ylab = "Mean adjusted adherence")
+Sys.time()
+```
+Best with 4 clusters
+```{r}
+K3 <- Results[[3]] #position 3 of the results array
+K3$Alpha
+```
+
+Plot the results checking source and general clustering:
+```{r}
+# Create function to make the points plot
+plot_points <- function(PCs, cluster_col, cluster_row, color, shape) {
+  for (j in 1:4) {
+    points(PCs$x[K3$Cbest[, cluster_col] == 1 & K3$Lbest[[cluster_row]][, j] == 1, 1], 
+           PCs$x[K3$Cbest[, cluster_col] == 1 & K3$Lbest[[cluster_row]][, j] == 1, 2], 
+           col = color, pch = shape[j]) 
+  }
+}
+
+colors <- c("black", "indianred", "lightskyblue", "mediumseagreen")
+symbols <- c(16, 3, 8, 5)
+
+plot_pcs <- function(data, title, alpha_value, m) {
+  par(mar=c(5, 4, 4, 8), xpd=TRUE)
+  PCs <- prcomp(t(data))
+  plot(PCs$x[, 1], PCs$x[, 2], cex = 0, xlab = "PC 1", ylab = "PC 2", 
+       main = bquote(.(title) ~ (alpha == .(alpha_value))))
+  
+  for (i in 1:4) {
+    plot_points(PCs, i, m, colors[i], symbols)
+  }
+  legend(x="topright", inset=c(-0.3, 0), legend= subtypes, title= "TCGA Subtypes", col = "ivory4", pch = symbols)
+  legend(x="bottomright", inset=c(-0.25, 0), legend= clustersbcc, title= "Clusters", col = colors, pch=15)
+}
+
+# GE analysis
+plot_pcs(BRCAData[[1]], "GE", 0.86, 1)
+
+# DNA methylation analysis
+plot_pcs(BRCAData[[2]], "ME", 0.57, 2)
+
+# miRNA analysis
+plot_pcs(BRCAData[[3]], "miRNA", 0.65, 3)
+
+# Protein analysis
+plot_pcs(BRCAData[[4]], "RPPA", 0.67, 4)
+```
+Check original data with our clusters
+```{r}
+Clusters <- rep(1, 348)
+Clusters[K3$Cbest[, 2] == 1] <- 2
+Clusters[K3$Cbest[, 3] == 1] <- 3
+Clusters[K3$Cbest[, 4] == 1] <- 4
+# ConfusionMat: All
+confmat <- matrix(nrow = 4, ncol = 4)
+for (i in 1:4) {
+  for (j in 1:4) {
+    confmat[i, j] <- sum(subtype == i & Clusters == j)
+  }
+}
+rownames(confmat) <- c("Her2","Basal","LumA","LumB")
+colnames(confmat) <- c("Cluster 1", "Cluster 2","Cluster 3","Cluster 4")
+```
+
+
+###10. iClusterPlus:
+We need to modify the data as samples need to be in rows, we can use X1,X2,X3 and X4 from mixOmics as we already transposed that data. First we need to determine the distribution of each dataset. However for this method to work we need to center the data, to do so we need to scale it
+```{r}
+sc_X2 <- scale(X2)
+sc_X3 <- scale(X3)
+
+hist(X1) #gaussian
+hist(sc_X2) #gaussian
+hist(sc_X3) #gaussian
+hist(X4) #gaussian
+```
+
+Once we get the data type (assume Gaussian)
+
+```{r}
+Sys.time()
+#try different k values and then compare the results
+fit_c_2 <- iClusterPlus(dt1 = X1, dt2 = sc_X2, dt3 = sc_X3, dt4 = X4, type = c("gaussian","gaussian","gaussian","gaussian"), lambda = c(0.90,0.60,0.75,0.05), K=2, maxiter = 10)
+fit_c_2$BIC
+fit_c_3 <- iClusterPlus(dt1 = X1, dt2 = sc_X2, dt3 = sc_X3, dt4 = X4, type = c("gaussian","gaussian","gaussian","gaussian"), lambda = c(0.90,0.60,0.75,0.05), K=3, maxiter = 10)
+fit_c_3$BIC
+Sys.time()
+```
+All BIC values are the same so we choose 4 clusters to check with the subtypes. Then we will plot the heatmap.
+We need to load library gplots to use it
+```{r}
+plotHeatmap(fit = fit_c_3, datasets = list(X1,sc_X2,sc_X3,X4), type = c("gaussian","gaussian","gaussian","gaussian"))
+```
+
+Now lets try with iClusterBayes
+```{r}
+Sys.time()
+fit_bayes_2 <- iClusterBayes(dt1 = X1, dt2 = sc_X2, dt3 = sc_X3, dt4 = X4, type = c("gaussian","gaussian","gaussian","gaussian"), K=2)
+fit_bayes_2$BIC
+fit_bayes_3 <- iClusterBayes(dt1 = X1, dt2 = sc_X2, dt3 = sc_X3, dt4 = X4, type = c("gaussian","gaussian","gaussian","gaussian"), K=3)
+fit_bayes_3$BIC
+Sys.time()
+```
+Plot heatmaps, the lowest BIC is obtained with k=3, so we plot the heatmap:
+```{r}
+plotHMBayes(fit = fit_bayes_3, datasets = list(X1,sc_X2,sc_X3,X4),type = c("gaussian","gaussian","gaussian","gaussian"))
+```
+Plot samples in PCA space as done in BCC and check with correct subtypes:
+```{r}
+par(mar=c(5, 4, 4, 8), xpd=TRUE)
+PC1 <- prcomp(X1)
+PC2 <- prcomp(sc_X2)
+PC3 <- prcomp(sc_X3)
+PC4 <- prcomp(X4)
+#iclusterPlus
+plot(PC1$x[, 1], PC1$x[, 2], xlab = "PC 1", ylab = "PC 2", 
+     main = "PC plot of samples for iClusterPlus", col= color[fit_c_3$clusters], pch=symbols[subtype])
+  
+legend(x="topright", inset=c(-0.3, 0), legend= subtypes, title= "TCGA Subtypes", col = "ivory4", pch = symbols)
+legend(x="bottomright", inset=c(-0.25, 0), legend= clustersbcc, title= "Clusters", col = color, pch=15)
+
+#iclusterbayes
+plot(PC1$x[, 1], PC1$x[, 2], xlab = "PC 1", ylab = "PC 2", 
+     main = "PC plot of samples for iClusterBayes", col= color[fit_bayes_3$clusters], pch=symbols[subtype])
+  
+legend(x="topright", inset=c(-0.3, 0), legend= subtypes, title= "TCGA Subtypes", col = "ivory4", pch = symbols)
+legend(x="bottomright", inset=c(-0.25, 0), legend= clustersbcc, title= "Clusters", col = color, pch=15)
+```
+
+
+Check the clusters and compare them with original TCGA 
+```{r}
+# Assign labels
+subtype_labels <- c("Her2", "Basal", "LumA", "LumB")
+cluster_labels <- c("Cluster 1", "Cluster 2", "Cluster 3", "Cluster 4")
+
+##IclusterPlus
+Clusters_icluster <- rep(1, 348)
+Clusters_icluster[fit_c_3$clusters == 2] <- 2
+Clusters_icluster[fit_c_3$clusters == 3] <- 3
+Clusters_icluster[fit_c_3$clusters == 4] <- 4
+# Confusion matrix
+confmat_icluster <- matrix(nrow = 4, ncol = 4)
+for (i in 1:4) {
+  for (j in 1:4) {
+    confmat_icluster[i, j] <- sum(subtype == i & Clusters_icluster == j)
+  }
+}
+# Assign names
+rownames(confmat_icluster) <- subtype_labels
+colnames(confmat_icluster) <- cluster_labels
+
+##IclusterBayes
+Clusters_iclusterB <- rep(1, 348)
+Clusters_iclusterB[fit_bayes_3$clusters == 2] <- 2
+Clusters_iclusterB[fit_bayes_3$clusters == 3] <- 3
+Clusters_iclusterB[fit_bayes_3$clusters == 4] <- 4
+# Confusion matrix
+confmat_iclusterB <- matrix(nrow = 4, ncol = 4)
+for (i in 1:4) {
+  for (j in 1:4) {
+    confmat_iclusterB[i, j] <- sum(subtype == i & Clusters_iclusterB == j)
+  }
+}
+# Assign names
+rownames(confmat_iclusterB) <- subtype_labels
+colnames(confmat_iclusterB) <- cluster_labels
+
+```
+
+##Calculate rand index:
+To check concordance between the methods we will calculate the rand index, to do so we will only check the methods that gave as a clustering output
+As we have different number of clusters for some of the methods the resulting matrix won't be symmetrical.
+First try all methods
+```{r}
+#install.packages("cata")
+library(cata) 
+icluster_cluster <- fit_c_3$clusters
+iclusterbayes_cluster <- fit_bayes_3$clusters
+name_methods <- c("snf","nemo","mocluster","pinsplus","intnmf","mofa","iclusterplus","iclbayes","bayescc")
+clustering_methods <- list(
+  snf = group,
+  nemo = clustering_nemo,
+  mocluster = unname(cls),
+  pinsplus = cluster1,
+  intnmf = clusters_int,
+  mofa = clusters_mofadf_1$cluster,
+  iclusterplus = icluster_cluster,
+  iclbayes = iclusterbayes_cluster,
+  bayescc = clusters_bcc
+)
+
+#Create matrix
+n <- length(name_methods)
+matrix_ARI <- matrix(0, nrow = n, ncol = n)
+matrix_pvalue <- matrix(0, nrow = n, ncol = n)
+rownames(matrix_ARI) <- name_methods
+colnames(matrix_ARI) <- name_methods
+rownames(matrix_pvalue) <- name_methods
+colnames(matrix_pvalue) <- name_methods
+
+#Fill matrices with ARI and pvalues
+for (i in 1:n) {
+  for (j in 1:n) {
+    set.seed(333)
+    ari <- ARI(clustering_methods[[i]], clustering_methods[[j]], signif = TRUE)
+    matrix_ARI[i, j] <- ari$ari
+    matrix_pvalue[i,j] <- ari$pvalue
+  }
+}
+```
+
+Now try only the ones that generated 2 clusters
+```{r}
+cluster_2_methods <- list(
+  snf = group,
+  nemo = clustering_nemo,
+  pinsplus = cluster1
+)
+#Create matrix
+n <- length(cluster_2_methods)
+matrix_ARI_2_clusters <- matrix(0, nrow = n, ncol = n)
+matrix_pvalue_2_clusters <- matrix(0, nrow = n, ncol = n)
+rownames(matrix_ARI_2_clusters) <- names(cluster_2_methods)
+colnames(matrix_ARI_2_clusters) <- names(cluster_2_methods)
+rownames(matrix_pvalue_2_clusters) <- names(cluster_2_methods)
+colnames(matrix_pvalue_2_clusters) <- names(cluster_2_methods)
+
+#Fill matrices with ARI and pvalues
+for (i in 1:n) {
+  for (j in 1:n) {
+    ari <- ARI(cluster_2_methods[[i]], cluster_2_methods[[j]], signif = TRUE)
+    matrix_ARI_2_clusters[i, j] <- ari$ari
+    matrix_pvalue_2_clusters[i,j] <- ari$pvalue
+  }
+}
+```
+
+Now for all the ones with 4 clusters:
+```{r}
+clustering_methods_4 <- list(
+  mocluster = unname(cls),
+  intnmf = clusters_int,
+  mofa = clusters_mofadf_1$cluster,
+  iclusterplus = icluster_cluster,
+  iclbayes = iclusterbayes_cluster,
+  bayescc = clusters_bcc
+)
+
+#Create matrix
+n <- length(clustering_methods_4)
+matrix_ARI_4_clusters <- matrix(0, nrow = n, ncol = n)
+matrix_pvalue_4_clusters <- matrix(0, nrow = n, ncol = n)
+rownames(matrix_ARI_4_clusters) <- names(clustering_methods_4)
+colnames(matrix_ARI_4_clusters) <- names(clustering_methods_4)
+rownames(matrix_pvalue_4_clusters) <- names(clustering_methods_4)
+colnames(matrix_pvalue_4_clusters) <- names(clustering_methods_4)
+
+#Fill matrices with ARI and pvalues
+for (i in 1:n) {
+  for (j in 1:n) {
+    ari <- ARI(clustering_methods_4[[i]], clustering_methods_4[[j]], signif = TRUE)
+    matrix_ARI_4_clusters[i, j] <- ari$ari
+    matrix_pvalue_4_clusters[i,j] <- ari$pvalue
+  }
+}
+```
+
+Now calculate the ARI and rand index value considering the true clustering
+```{r}
+#install.packages("fossil")
+#library("fossil")
+#subtype variable are the true clusters
+n <- length(name_methods)
+#Calculate ARI values for true clusters
+matrix_ARI_true <- matrix(0, nrow = 3, ncol = n) #we want one row for the ARI value, another for the p-value and other for the rand.index and 9 columns for the methods
+rownames(matrix_ARI_true) <- c("True_cluster-ARI", "p-value","rand-index")
+colnames(matrix_ARI_true) <- name_methods
+
+#Fill matrix
+for (j in 1:n){
+  ari <- ARI(subtype, clustering_methods[[j]], signif = TRUE)
+  matrix_ARI_true[1,j] <- ari$ari
+  matrix_ARI_true[2,j] <- ari$pvalue
+  matrix_ARI_true[3,j] <- rand.index(subtype, clustering_methods[[j]])
+}
+```
+
+Now I want to calculate the adjusted mutual information (AMI):
+```{r}
+#install.packages("aricode")
+#library(aricode)
+matrix_AMI <-  matrix(0, nrow = 1, ncol = n) #ami between true clustering and methods clustering
+rownames(matrix_AMI) <- "AMI- true cluster"
+colnames(matrix_AMI) <- name_methods
+
+#Fill matrix
+for (j in 1:n){
+  ami <- AMI(subtype, clustering_methods[[j]])
+  matrix_AMI[1,j] <- ami
+}
+```
+
+Now do the same for all methods:
+```{r}
+matrix_AMI_full <-  matrix(0, nrow = n, ncol = n) #ami between methods
+rownames(matrix_AMI_full) <- name_methods
+colnames(matrix_AMI_full) <- name_methods
+
+#Fill matrix
+for (i in 1:n){
+  for (j in 1:n){
+  ami <- AMI(clustering_methods[[i]], clustering_methods[[j]])
+  matrix_AMI_full[i,j] <- ami
+  }
+}
+
+```
+
+###Additional plots:
+ARI in correlation matrix:
+```{r}
+corrplot(matrix_ARI, col = COL2('BrBG'), method = 'color', tl.col = "black", p.mat = matrix_pvalue, sig.level = -1,insig = 'p-value')
+corrplot(matrix_ARI_2_clusters, col = COL2('BrBG'), method = 'color', tl.col = "black", p.mat = matrix_pvalue_2_clusters, sig.level = -1,insig = 'p-value')
+corrplot(matrix_ARI_4_clusters, col = COL2('BrBG'), method = 'color', tl.col = "black", p.mat = matrix_pvalue_4_clusters, sig.level = -1,insig = 'p-value')
+```
+AMI in correlation plot:
+```{r}
+#pdf("prueba.pdf")
+corrplot(matrix_AMI_full, addCoef.col = 'black',col = COL2('BrBG'), method = 'color', tl.col = "black")
+#dev.off()
+```
+
+
